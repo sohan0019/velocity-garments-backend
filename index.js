@@ -56,6 +56,17 @@ async function run() {
     const usersCollection = db.collection('users');
     const ordersCollection = db.collection('orders');
 
+    //role middlewares
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await usersCollection.findOne({ email });
+      if (user?.role !== 'Admin') {
+        return res.status(403).send({ message: 'Admin only Actions', role: user?.role })
+      }
+      next();
+    }
+
+    //Products
     app.post('/products', async (req, res) => {
       const productsData = req.body;
       const result = await productsCollection.insertOne(productsData);
@@ -64,12 +75,6 @@ async function run() {
 
     app.get('/products', async (req, res) => {
       const result = await productsCollection.find().toArray();
-      res.send(result);
-    })
-
-    app.get('/manage-products/:email', verifyJWT, async (req, res) => {
-      const email = req.params.email;
-      const result = await productsCollection.find({ 'manager.email': email }).toArray();
       res.send(result);
     })
 
@@ -87,22 +92,24 @@ async function run() {
       res.send(result);
     })
 
+    app.get('/homepage-products', async (req, res) => {
+      try {
+        const query = { showOnHome: true };
+        const result = await productsCollection.find(query).limit(8).toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching products", error });
+      }
+    })
+
     app.patch('/product/:id', verifyJWT, async (req, res) => {
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedData = req.body;
 
       const updateDoc = {
-        $set: {
-          name: updatedData.name,
-          category: updatedData.category,
-          price: updatedData.price,
-          quantity: updatedData.quantity,
-          minOrder: updatedData.moq,
-          showOnHome: updatedData.showOnHome,
-          description: updatedData.description,
-          images: updatedData.images,
-        },
+        $set: updatedData,
       };
 
       try {
@@ -114,10 +121,17 @@ async function run() {
       }
     });
 
+    app.get('/manage-products/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      const result = await productsCollection.find({ 'manager.email': email }).toArray();
+      res.send(result);
+    })
+
+
     //user
     app.post('/user', async (req, res) => {
       const userData = req.body;
-      console.log(userData);
+      // console.log(userData);
 
       userData.created_at = new Date().toISOString();
       userData.last_logged_in = new Date().toISOString();
@@ -143,24 +157,96 @@ async function run() {
       res.send(result);
     })
 
+    app.get('/user', verifyJWT, verifyAdmin, async (req, res) => {
+      const adminEmail = req.tokenEmail;
+      const result = await usersCollection.find({ email: { $ne: adminEmail } }).toArray();
+      res.send(result);
+    })
+
     app.get('/user/role', verifyJWT, async (req, res) => {
       const email = req.tokenEmail;
       const result = await usersCollection.findOne({ email })
       res.send({ role: result?.role })
     })
 
-    app.post('/orders', async (req, res) => {
-      const order = req.body;
-
-      const query = { orderQuantity: order.orderQuantity };
-      const existingOrder = await ordersCollection.findOne(query);
-
-      if (existingOrder) {
-        return res.status(409).send({ message: 'Order already exists.' });
-      }
-      const result = await ordersCollection.insertOne(order);
+    //update users role
+    app.patch('/update-status', verifyJWT, verifyAdmin, async (req, res) => {
+      const { email, status } = req.body;
+      const result = await usersCollection.updateOne({ email }, { $set: { status } });
       res.send(result);
+    })
+
+
+    //Orders
+    app.post('/orders', async (req, res) => {
+      try {
+        const order = req.body;
+        const { productId } = order;
+
+        const orderQuantity = Number(order.orderQuantity);
+        const availableStock = Number(currentProduct.quantity);
+
+        if (!productId || !ObjectId.isValid(productId)) {
+          return res.status(400).send({ message: "Invalid productId" });
+        }
+        if (!orderQuantity || orderQuantity <= 0) {
+          return res.status(400).send({ message: "Invalid order quantity" });
+        }
+
+        const currentProduct = await productsCollection.findOne({
+          _id: new ObjectId(productId),
+        });
+
+        if (!currentProduct) {
+          return res.status(404).send({ message: "Product not found" });
+        }
+        if (isNaN(availableStock)) {
+          return res.status(500).send({
+            message: "Product stock is corrupted (not a number)",
+          });
+        }
+        if (orderQuantity > availableStock) {
+          return res.status(400).send({
+            message: `Only ${availableStock} items available in stock`,
+          });
+        }
+
+        await productsCollection.updateOne(
+          { _id: new ObjectId(productId) },
+          {
+            $set: {
+              quantity: availableStock - orderQuantity,
+            },
+          }
+        );
+
+        const result = await ordersCollection.insertOne({
+          ...order,
+          orderQuantity,
+          createdAt: new Date(),
+        });
+
+        res.send(result);
+
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Something went wrong" });
+      }
     });
+
+    app.get('/orders', verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const result = await ordersCollection.find({ buyerEmail: email }).toArray();
+      res.send(result);
+    })
+
+    app.get('/all-orders', verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const result = await ordersCollection.find().toArray();
+      res.send(result);
+    })
+
+
 
 
 
