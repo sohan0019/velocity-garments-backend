@@ -48,6 +48,18 @@ const client = new MongoClient(process.env.MONGODB_URI, {
     deprecationErrors: true,
   },
 })
+
+//Creating random trackingId
+const crypto = require("crypto");
+
+function generateTrackingId() {
+  const prefix = "PRCL"; // your brand prefix
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6-char random hex
+
+  return `${prefix}-${date}-${random}`;
+}
+
 async function run() {
   try {
 
@@ -55,6 +67,7 @@ async function run() {
     const productsCollection = db.collection('products');
     const usersCollection = db.collection('users');
     const ordersCollection = db.collection('orders');
+    const trackingsCollection = db.collection('trackings');
 
     //role middlewares
     const verifyAdmin = async (req, res, next) => {
@@ -65,6 +78,19 @@ async function run() {
       }
       next();
     }
+
+    //tracking log function
+    const logTracking = async (trackingId, status) => {
+      const log = {
+        trackingId,
+        status,
+        details: status.split('-').join(' '),
+        createdAt: new Date(),
+      }
+      const result = await trackingsCollection.insertOne(log)
+      return result;
+    }
+
 
     //Products
     app.post('/products', async (req, res) => {
@@ -181,10 +207,14 @@ async function run() {
     app.post('/orders', async (req, res) => {
       try {
         const order = req.body;
+        const trackingId = generateTrackingId();
+        order.createdAt = new Date();
+        order.trackingId = trackingId;
+        order.orderStatus = 'pending';
+
         const { productId } = order;
 
         const orderQuantity = Number(order.orderQuantity);
-        const availableStock = Number(currentProduct.quantity);
 
         if (!productId || !ObjectId.isValid(productId)) {
           return res.status(400).send({ message: "Invalid productId" });
@@ -200,6 +230,9 @@ async function run() {
         if (!currentProduct) {
           return res.status(404).send({ message: "Product not found" });
         }
+
+        const availableStock = Number(currentProduct.quantity);
+
         if (isNaN(availableStock)) {
           return res.status(500).send({
             message: "Product stock is corrupted (not a number)",
@@ -220,11 +253,9 @@ async function run() {
           }
         );
 
-        const result = await ordersCollection.insertOne({
-          ...order,
-          orderQuantity,
-          createdAt: new Date(),
-        });
+        logTracking(trackingId, 'Order-created');
+
+        const result = await ordersCollection.insertOne(order);
 
         res.send(result);
 
@@ -243,6 +274,19 @@ async function run() {
     app.get('/all-orders', verifyJWT, async (req, res) => {
       const email = req.tokenEmail;
       const result = await ordersCollection.find().toArray();
+      res.send(result);
+    })
+
+    app.delete('/orders/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await ordersCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.get('/pending-orders', verifyJWT, async (req, res) => {
+      const email = req.tokenEmail;
+      const result = await ordersCollection.find({ buyerEmail: email }).toArray();
       res.send(result);
     })
 
