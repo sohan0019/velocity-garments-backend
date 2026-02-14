@@ -284,9 +284,34 @@ async function run() {
       res.send(result);
     });
 
+    app.patch('/orders/:id', verifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const { status, trackingId } = req.body;
+      console.log(status, trackingId);
+      try {
+        if (trackingId) {
+          logTracking(trackingId, `Order-${status}`);
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { orderStatus: status },
+        };
+
+        const result = await ordersCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Update failed", error });
+      }
+    });
+
+
     app.get('/pending-orders', verifyJWT, async (req, res) => {
-      const email = req.tokenEmail;
-      const result = await ordersCollection.find({ buyerEmail: email }).toArray();
+      const result = await ordersCollection.find({ orderStatus: 'pending' }).toArray();
+      res.send(result);
+    })
+    app.get('/approved-orders', verifyJWT, async (req, res) => {
+      const result = await ordersCollection.find({ orderStatus: 'approved' }).toArray();
       res.send(result);
     })
 
