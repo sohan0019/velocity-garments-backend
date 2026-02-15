@@ -196,6 +196,14 @@ async function run() {
       res.send({ role: result?.role })
     })
 
+    app.get('/user/:email', async (req, res) => {
+      const email = req.params.email
+     
+      const user = await usersCollection.findOne({ email })
+      res.send(user)
+    })
+
+
     //update users role
     app.patch('/update-status', verifyJWT, verifyAdmin, async (req, res) => {
       const { email, status } = req.body;
