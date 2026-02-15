@@ -80,10 +80,11 @@ async function run() {
     }
 
     //tracking log function
-    const logTracking = async (trackingId, status) => {
+    const logTracking = async (trackingId, status, location) => {
       const log = {
         trackingId,
         status,
+        location,
         details: status.split('-').join(' '),
         createdAt: new Date(),
       }
@@ -253,7 +254,7 @@ async function run() {
           }
         );
 
-        logTracking(trackingId, 'Order-created');
+        logTracking(trackingId, 'Order-created', 'Main Warehouse');
 
         const result = await ordersCollection.insertOne(order);
 
@@ -290,7 +291,7 @@ async function run() {
       console.log(status, trackingId);
       try {
         if (trackingId) {
-          logTracking(trackingId, `Order-${status}`);
+          logTracking(trackingId, `Order-${status}`, 'Main Warehouse');
         }
 
         const query = { _id: new ObjectId(id) };
@@ -311,10 +312,48 @@ async function run() {
       res.send(result);
     })
     app.get('/approved-orders', verifyJWT, async (req, res) => {
-      const result = await ordersCollection.find({ orderStatus: 'approved' }).toArray();
+      const result = await ordersCollection.aggregate([
+        { $match: { orderStatus: 'approved' } }, // Filter only approved orders
+        {
+          $lookup: {
+            from: 'trackings',           // The collection to join with
+            localField: 'trackingId',    // Field from ordersCollection
+            foreignField: 'trackingId',  // Field from trackings collection
+            as: 'trackingHistory'        // Name for the new array field
+          }
+        },
+        {
+          $addFields: {
+            // Get the latest tracking entry by looking at the last item in the array
+            latestTracking: { $arrayElemAt: ["$trackingHistory", -1] }
+          }
+        }
+      ]).toArray();
+
+      res.send(result);
+    });
+
+    app.post('/add-tracking', verifyJWT, async (req, res) => {
+      const { trackingId, status, location } = req.body;
+
+      try {
+        if (!trackingId || !status || !location) {
+          return res.status(400).send({ message: 'Missing required fields' });
+        }
+        const result = await logTracking(trackingId, status, location);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to log tracking' });
+      }
+    });
+
+    //Tracking APIs
+    app.get('/trackings/:trackingId/logs', async (req, res) => {
+      const trackingId = req.params.trackingId;
+      const query = { trackingId };
+      const result = await trackingsCollection.find(query).toArray();
       res.send(result);
     })
-
 
 
 
