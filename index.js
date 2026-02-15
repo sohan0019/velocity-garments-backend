@@ -198,7 +198,7 @@ async function run() {
 
     app.get('/user/:email', async (req, res) => {
       const email = req.params.email
-     
+
       const user = await usersCollection.findOne({ email })
       res.send(user)
     })
@@ -280,6 +280,46 @@ async function run() {
       res.send(result);
     })
 
+    app.get('/orders/:id', verifyJWT, async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        const result = await ordersCollection.aggregate([
+          { $match: { _id: new ObjectId(id) } },
+          {
+            $addFields: {
+              product_oid: { $toObjectId: "$productId" }
+            }
+          },
+          {
+            $lookup: {
+              from: 'products',
+              localField: 'product_oid',
+              foreignField: '_id',
+              as: 'productDetails'
+            }
+          },
+          { $unwind: '$productDetails' },
+          {
+            $addFields: {
+              productImage: { $arrayElemAt: ['$productDetails.images', 0] }
+            }
+          },
+          {
+            $project: {
+              productDetails: 0,
+              product_oid: 0
+            }
+          }
+        ]).next();
+
+        if (!result) return res.status(404).send({ message: "Order not found" });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching order details", error });
+      }
+    });
+
     app.get('/all-orders', verifyJWT, async (req, res) => {
       const email = req.tokenEmail;
       const result = await ordersCollection.find().toArray();
@@ -321,18 +361,17 @@ async function run() {
     })
     app.get('/approved-orders', verifyJWT, async (req, res) => {
       const result = await ordersCollection.aggregate([
-        { $match: { orderStatus: 'approved' } }, // Filter only approved orders
+        { $match: { orderStatus: 'approved' } },
         {
           $lookup: {
-            from: 'trackings',           // The collection to join with
-            localField: 'trackingId',    // Field from ordersCollection
-            foreignField: 'trackingId',  // Field from trackings collection
-            as: 'trackingHistory'        // Name for the new array field
+            from: 'trackings',
+            localField: 'trackingId',
+            foreignField: 'trackingId',
+            as: 'trackingHistory'
           }
         },
         {
           $addFields: {
-            // Get the latest tracking entry by looking at the last item in the array
             latestTracking: { $arrayElemAt: ["$trackingHistory", -1] }
           }
         }
@@ -363,6 +402,16 @@ async function run() {
       res.send(result);
     })
 
+    app.get('/user-order-tracking/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
+
+      if (req.tokenEmail !== email) {
+        return res.status(403).send({ message: "Forbidden Access" });
+      }
+
+      const result = await ordersCollection.find({ buyerEmail: email }).toArray();
+      res.send(result);
+    });
 
 
 
