@@ -8,6 +8,11 @@ const { ObjectId } = require('mongodb');
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString(
   'utf-8'
 )
+
+//stripe
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+
 const serviceAccount = JSON.parse(decoded)
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -17,28 +22,28 @@ const app = express()
 // middleware
 app.use(
   cors({
-    origin: [process.env.CLIENT_URL],
+    origin: 'http://localhost:5173',
     credentials: true,
-    optionSuccessStatus: 200,
+    optionsSuccessStatus: 200,
   })
-)
+);
 app.use(express.json())
 
 // jwt middlewares
 const verifyJWT = async (req, res, next) => {
-  const token = req?.headers?.authorization?.split(' ')[1]
-  console.log(token)
-  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
+  const token = req?.headers?.authorization?.split(' ')[1];
+  console.log('Token received:', token);
+  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' });
   try {
-    const decoded = await admin.auth().verifyIdToken(token)
-    req.tokenEmail = decoded.email
-    console.log(decoded)
-    next()
+    const decoded = await admin.auth().verifyIdToken(token);
+    console.log('Decoded token:', decoded);
+    req.tokenEmail = decoded.email;
+    next();
   } catch (err) {
-    console.log(err)
-    return res.status(401).send({ message: 'Unauthorized Access!', err })
+    console.error('JWT error:', err);
+    return res.status(401).send({ message: 'Unauthorized Access!', err });
   }
-}
+};
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(process.env.MONGODB_URI, {
@@ -79,6 +84,15 @@ async function run() {
       next();
     }
 
+    const verifyManager = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await usersCollection.findOne({ email });
+      if (user?.role !== 'Manager' && user?.role !== 'Admin') {
+        return res.status(403).send({ message: 'Manager access required' });
+      }
+      next();
+    };
+
     //tracking log function
     const logTracking = async (trackingId, status, location) => {
       const log = {
@@ -94,8 +108,11 @@ async function run() {
 
 
     //Products
-    app.post('/products', async (req, res) => {
+    app.post('/products', verifyJWT, verifyManager, async (req, res) => {
       const productsData = req.body;
+      if (productsData.quantity) productsData.quantity = Number(productsData.quantity);
+      if (productsData.price) productsData.price = Number(productsData.price);
+      if (productsData.moq) productsData.moq = Number(productsData.moq);
       const result = await productsCollection.insertOne(productsData);
       res.send(result);
     })
@@ -122,7 +139,7 @@ async function run() {
     app.get('/homepage-products', async (req, res) => {
       try {
         const query = { showOnHome: true };
-        const result = await productsCollection.find(query).limit(8).toArray();
+        const result = await productsCollection.find(query).sort({ _id: -1 }).limit(8).toArray();
 
         res.send(result);
       } catch (error) {
@@ -130,7 +147,7 @@ async function run() {
       }
     })
 
-    app.patch('/product/:id', verifyJWT, async (req, res) => {
+    app.patch('/product/:id', verifyJWT, verifyManager, async (req, res) => {
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedData = req.body;
@@ -206,10 +223,20 @@ async function run() {
 
     //update users role
     app.patch('/update-status', verifyJWT, verifyAdmin, async (req, res) => {
-      const { email, status } = req.body;
-      const result = await usersCollection.updateOne({ email }, { $set: { status } });
+      const { email, status, reason } = req.body;
+
+      const result = await usersCollection.updateOne(
+        { email },
+        {
+          $set: {
+            status: status,
+            reason: reason,
+          }
+        }
+      );
+
       res.send(result);
-    })
+    });
 
 
     //Orders
@@ -355,13 +382,20 @@ async function run() {
     });
 
 
-    app.get('/pending-orders', verifyJWT, async (req, res) => {
-      const result = await ordersCollection.find({ orderStatus: 'pending' }).toArray();
+    app.get('/pending-orders/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      const result = await ordersCollection.find({ orderStatus: 'pending', managerEmail: email, }).toArray();
       res.send(result);
     })
-    app.get('/approved-orders', verifyJWT, async (req, res) => {
+    app.get('/approved-orders/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
       const result = await ordersCollection.aggregate([
-        { $match: { orderStatus: 'approved' } },
+        {
+          $match: {
+            orderStatus: 'approved',
+            managerEmail: email,
+          }
+        },
         {
           $lookup: {
             from: 'trackings',
@@ -412,6 +446,191 @@ async function run() {
       const result = await ordersCollection.find({ buyerEmail: email }).toArray();
       res.send(result);
     });
+
+    //payment from stripe
+    app.post('/create-checkout-session', async (req, res) => {
+      const paymentInfo = req.body;
+      console.log(paymentInfo);
+
+      const session = await stripe.checkout.sessions.create({
+        line_items: [{
+          price_data: {
+            currency: 'bdt',
+            product_data: {
+              name: paymentInfo?.name,
+            },
+            unit_amount: paymentInfo?.price * 100,
+          },
+          quantity: paymentInfo?.orderQuantity,
+        }],
+        customer_email: paymentInfo?.buyerEmail,
+        mode: 'payment',
+        metadata: {
+          productId: paymentInfo?.productId,
+          buyerEmail: paymentInfo?.buyerEmail,
+          firstName: paymentInfo?.firstName,
+          phone: paymentInfo?.phone,
+          address: paymentInfo?.address,
+          additionalNotes: paymentInfo?.additionalNotes || "",
+          orderQuantity: paymentInfo?.orderQuantity.toString(),
+        },
+        success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.CLIENT_URL}/plant/${paymentInfo.productId}`,
+      })
+      res.send({ url: session.url })
+    })
+
+    app.post('/payment-success', async (req, res) => {
+      const { sessionId } = req.body;
+      const trackingId = generateTrackingId();
+
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        const existingOrder = await ordersCollection.findOne({ transactionId: session.payment_intent });
+        if (existingOrder) {
+          return res.send({
+            transactionId: session.payment_intent,
+            orderId: existingOrder._id,
+          });
+        }
+
+        const product = await productsCollection.findOne({ _id: new ObjectId(session.metadata.productId) });
+
+        if (session.payment_status === 'paid' && product) {
+          const quantityPurchased = parseInt(session.metadata.orderQuantity);
+
+          // 2. Prepare order info with EXACT keys from metadata
+          const orderInfo = {
+            buyerEmail: session.metadata.buyerEmail,
+            name: product.name,
+            price: product.price,
+            paymentMethod: 'Stripe',
+            firstName: session.metadata.firstName,
+            orderQuantity: quantityPurchased,
+            orderPrice: session.amount_total / 100,
+            phone: session.metadata.phone,
+            address: session.metadata.address,
+            additionalNotes: session.metadata.additionalNotes,
+            productId: session.metadata.productId,
+            paymentStatus: 'paid',
+            managerEmail: product.manager.email,
+            createdAt: new Date(),
+            transactionId: session.payment_intent,
+            trackingId: trackingId,
+            orderStatus: 'pending',
+          };
+
+          logTracking(trackingId, 'Order-created', 'Main Warehouse');
+          // 3. Save order to DB
+          const result = await ordersCollection.insertOne(orderInfo);
+
+          // 4. Correctly decrement stock using productId (not plantId)
+          await productsCollection.updateOne(
+            { _id: new ObjectId(session.metadata.productId) },
+            { $inc: { quantity: -quantityPurchased } }
+          );
+
+          return res.send({
+            transactionId: session.payment_intent,
+            orderId: result.insertedId,
+          });
+        }
+
+        res.status(400).send({ message: "Payment not verified or product missing" });
+      } catch (error) {
+        console.error("Payment Success Error:", error);
+        res.status(500).send({ message: "Internal Server Error", error: error.message });
+      }
+    });
+
+    //statistics
+    app.get('/admin-stats', verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const productCount = await productsCollection.countDocuments();
+        const orderCount = await ordersCollection.countDocuments();
+
+        const managerCount = await usersCollection.countDocuments({ role: 'Manager' });
+        const buyerCount = await usersCollection.countDocuments({ role: 'Buyer' });
+
+        res.send({
+          products: productCount,
+          orders: orderCount,
+          managers: managerCount,
+          buyers: buyerCount
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch stats" });
+      }
+    });
+
+    app.get('/manager-stats',verifyJWT, verifyManager, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res.status(401).send({ message: "Unauthorized: No email found" });
+        }
+
+        const totalProducts = await productsCollection.countDocuments({ "manager.email": email });
+        const totalOrders = await ordersCollection.countDocuments({ managerEmail: email });
+        const approvedOrders = await ordersCollection.countDocuments({
+          managerEmail: email,
+          orderStatus: 'approved'
+        });
+        const pendingOrders = await ordersCollection.countDocuments({
+          managerEmail: email,
+          orderStatus: 'pending'
+        });
+
+        res.send({
+          totalProducts,
+          totalOrders,
+          approvedOrders,
+          pendingOrders
+        });
+
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch stats" });
+      }
+    });
+
+    app.get('/buyer-stats', async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res.status(401).send({ message: "Unauthorized: No email found" });
+        }
+        const totalApprovedOrders = await ordersCollection.countDocuments({
+          buyerEmail: email,
+          orderStatus: 'approved',
+        })
+        const totalPendingOrders = await ordersCollection.countDocuments({
+          buyerEmail: email,
+          orderStatus: 'pending',
+        })
+        const totalRejectedOrders = await ordersCollection.countDocuments({
+          buyerEmail: email,
+          orderStatus: 'rejected',
+        })
+        const paidOrders = await ordersCollection.countDocuments({
+          buyerEmail: email,
+          paymentStatus: 'paid',
+        })
+        const codOrders = await ordersCollection.countDocuments({
+          buyerEmail: email,
+          paymentStatus: 'cod',
+        })
+
+        res.send({
+          totalApprovedOrders,
+          totalPendingOrders,
+          totalRejectedOrders,
+          paidOrders,
+          codOrders,
+        })
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch stats" });
+      }
+    })
 
 
 
