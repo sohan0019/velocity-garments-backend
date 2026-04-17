@@ -22,7 +22,7 @@ const app = express()
 // middleware
 app.use(
   cors({
-    origin: 'http://localhost:5173',
+    origin: ['http://localhost:5173', 'https://velocity-garments-frontend.web.app'],
     credentials: true,
     optionsSuccessStatus: 200,
   })
@@ -32,11 +32,11 @@ app.use(express.json())
 // jwt middlewares
 const verifyJWT = async (req, res, next) => {
   const token = req?.headers?.authorization?.split(' ')[1];
-  console.log('Token received:', token);
+  //console.log('Token received:', token);
   if (!token) return res.status(401).send({ message: 'Unauthorized Access!' });
   try {
     const decoded = await admin.auth().verifyIdToken(token);
-    console.log('Decoded token:', decoded);
+    //console.log('Decoded token:', decoded);
     req.tokenEmail = decoded.email;
     next();
   } catch (err) {
@@ -186,7 +186,7 @@ async function run() {
       console.log('User Already Exists ----> ', !!existingUser);
 
       if (existingUser) {
-        console.log('Updating User Info...........');
+        //console.log('Updating User Info...........');
         const result = await usersCollection.updateOne(query,
           {
             $set: {
@@ -196,7 +196,7 @@ async function run() {
         return res.send(result);
       }
 
-      console.log('Saving new user info......');
+      //console.log('Saving new user info......');
       const result = await usersCollection.insertOne(userData);
       res.send(result);
     })
@@ -363,7 +363,7 @@ async function run() {
     app.patch('/orders/:id', verifyJWT, async (req, res) => {
       const id = req.params.id;
       const { status, trackingId } = req.body;
-      console.log(status, trackingId);
+      //console.log(status, trackingId);
       try {
         if (trackingId) {
           logTracking(trackingId, `Order-${status}`, 'Main Warehouse');
@@ -450,7 +450,7 @@ async function run() {
     //payment from stripe
     app.post('/create-checkout-session', async (req, res) => {
       const paymentInfo = req.body;
-      console.log(paymentInfo);
+      //console.log(paymentInfo);
 
       const session = await stripe.checkout.sessions.create({
         line_items: [{
@@ -636,9 +636,9 @@ async function run() {
 
     // Send a ping to confirm a successful connection
     await client.db('admin').command({ ping: 1 })
-    console.log(
-      'Pinged your deployment. You successfully connected to MongoDB!'
-    )
+    // console.log(
+    //   'Pinged your deployment. You successfully connected to MongoDB!'
+    // )
   } finally {
     // Ensures that the client will close when you finish/error
   }
